@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Pixel Shooter X (Full)</title>
+<style>
+  :root{--bg:#071024;--panel:#081428;--accent:#61dafb;--muted:#9fb0c8}
+  html,body{height:100%;margin:0;font-family:Inter,system-ui,Arial;background:#041026;color:#eaf6ff}
+  .center{display:flex;align-items:center;justify-content:center;height:100vh;width:100vw}
+  canvas{background:var(--panel);border-radius:8px;display:block;margin:0 auto}
+  #uiOverlay{position:fixed;left:12px;top:12px;color:var(--muted);font-family:monospace}
+  #startScreen,#gameOverScreen,#skillScreen{
+    position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    background:rgba(0,0,0,0.75);z-index:40;flex-direction:column;
+  }
+  .btn{padding:12px 18px;border-radius:8px;border:none;background:#2ecc71;color:#000;cursor:pointer;font-weight:600}
+  .skillBtn{padding:10px 14px;border-radius:8px;border:1px solid #ccc;background:#222;color:#fff;margin:8px;cursor:pointer}
+  .hudLine{margin:4px 0}
+  /* Keep HUD crisp: don't let browser scale canvas text by CSS pixelation */
+  canvas{image-rendering:auto}
+</style>
+</head>
+<body>
+  <div class="center">
+    <canvas id="game" width="360" height="600"></canvas>
+  </div>
+
+  <div id="uiOverlay" aria-hidden="true">
+    <div class="hudLine" id="hudScore">Score: 0</div>
+    <div class="hudLine" id="hudLives">Lives: 3</div>
+    <div class="hudLine" id="hudWave">Wave: 1</div>
+    <div class="hudLine" id="hudLevel">Level: 1</div>
+    <div class="hudLine" id="hudExp">EXP: 0/20</div>
+    <div class="hudLine" id="hudAmmo">Ammo: 20/20</div>
+    <div style="font-size:12px;color:#9fb0c8;margin-top:6px">Controls: ← → to move • Space to shoot • R to reload</div>
+  </div>
+
+  <!-- Start screen -->
+  <div id="startScreen">
+    <div style="text-align:center">
+      <h1 style="margin:0 0 10px">PIXEL SHOOTER X</h1>
+      <div style="margin-bottom:8px;color:#cfefff">Classic pixel waves — press Start to play</div>
+      <button class="btn" onclick="onStart()">Start</button>
+    </div>
+  </div>
+
+  <!-- Skill selection screen (appears on level up) -->
+  <div id="skillScreen" style="display:none">
+    <div style="text-align:center;color:#fff">
+      <h2 style="margin-bottom:6px">Level Up! Choose a skill</h2>
+      <div id="skillChoices" style="display:flex;gap:10px;justify-content:center;padding:8px"></div>
+    </div>
+  </div>
+
+  <!-- Game over / restart -->
+  <div id="gameOverScreen" style="display:none">
+    <div style="text-align:center">
+      <h1 style="margin:0 0 10px">Game Over</h1>
+      <div id="finalScore" style="margin-bottom:10px"></div>
+      <button class="btn" onclick="doRestart()">Restart</button>
+    </div>
+  </div>
+
+<script>
+/* ----------------------
+   Constants & Globals
+   ---------------------- */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+let running = false;
+let pausedForSkill = false;
+
+let bullets = [];
+let enemies = [];
+let particles = [];
+
+let score = 0;
+let wave = 1;
+let lives = 3;
+
+let ispause = false
+// Player
+let player = {
+  x: W/2 - 12,
+  y: H - 56,
+  w: 24,
+  h: 24,
+  speed: 2,           // reduced speed (low)
+  ammo: 20,
+  maxAmmo: 20,
+  reloading: false,
+  reloadTime: 90,     // frames (~1.5s at 60fps)
+  reloadCounter: 0,
+  fireRate: 12,       // frames between shots
+  cooldown: 0,
+  damage: 2,
+  multi: 1,           // multi-shot count
+  bulletSpeed: 8,
+  shield: 0,
+  invincibleTimer: 0
+};
+
+// EXP / Level
+let exp = 0;
+let level = 1;
+let expToNext = 20;
+const maxLevel = 20;
+
+// skills
+const allSkills = [
+  "Extra Life +1",
+  "Faster Player",
+  "Reduce Cooldown",
+  "Double Ammo",
+  "Multi Shot +1",
+  "Rapid Fire"
+
+];
+let learnedSkills = {};
+
+// Input
+const keys = { left:false, right:false, shoot:false, reload:false };
+
+/* ----------------------
+   Helpers
+   ---------------------- */
+function rand(min,max){ return Math.random()*(max-min)+min; }
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+
+/* ----------------------
+   UI elements
+   ---------------------- */
+const hudScore = document.getElementById('hudScore');
+const hudLives = document.getElementById('hudLives');
+const hudWave = document.getElementById('hudWave');
+const hudLevel = document.getElementById('hudLevel');
+const hudExp = document.getElementById('hudExp');
+const hudAmmo = document.getElementById('hudAmmo');
+
+function updateHUD(){
+  hudScore.textContent = `Score: ${score}`;
+  hudLives.textContent = `Lives: ${lives}`;
+  hudWave.textContent = `Wave: ${wave}`;
+  hudLevel.textContent = `Level: ${level}`;
+  hudExp.textContent = `EXP: ${exp}/${expToNext}`;
+  hudAmmo.textContent = `Ammo: ${player.ammo}/${player.maxAmmo}` + (player.reloading ? ' (Reloading...)' : '');
+}
+
+/* ----------------------
+   Start / Restart
+   ---------------------- */
+function onStart(){
+  document.getElementById('startScreen').style.display = 'none';
+  initGame();
+  running = true;
+  requestAnimationFrame(loop);
+}
+
+function doRestart(){
+  document.getElementById('gameOverScreen').style.display = 'none';
+  initGame();
+  running = true;
+  requestAnimationFrame(loop);
+}
+
+function initGame(){
+  bullets = [];
+  enemies = [];
+  particles = [];
+  score = 0;
+  wave = 1;
+  lives = 3;
+  level = 1;
+  exp = 0;
+  expToNext = 20;
+  player.x = W/2 - player.w/2;
+  player.ammo = player.maxAmmo;
+  player.reloading = false;
+  player.reloadCounter = 0;
+  player.cooldown = 0;
+  // initial spawn
+  spawnWave();
+  updateHUD();
+}
+
+/* ----------------------
+   Enemy spawn
+   ---------------------- */
+function spawnWave(){
+  enemies = [];
+  const count = 5 + (wave-1)*2;
+  for(let i=0;i<count;i++){
+    const size = 20;
+    const hp = Math.round(10 * Math.pow(1.5, wave-1));
+    enemies.push({
+      x: rand(8, W - size - 8),
+      y: -rand(20, 200) - i * 30,
+      w: size, h: size,
+      speed: 0.6 + (wave-1)*0.05 + Math.random()*0.4,
+      hp: hp
+    });
+  }
+}
+
+/* ----------------------
+   Shooting / Reloading
+   ---------------------- */
+function tryShoot(){
+  if(!running || pausedForSkill) return;
+  if(player.reloading) return;
+  if(player.cooldown > 0) return;
+  if(player.ammo <= 0){
+    player.reloading = true;
+    return;
+  }
+  // shoot one or multi shots
+  const shots = Math.max(1, player.multi || 1);
+  for(let s=0;s<shots;s++){
+    // small spread when multi
+    const spread = (shots>1) ? (s - (shots-1)/2) * 6 * (Math.PI/180) : 0;
+    bullets.push({
+      x: player.x + player.w/2 - 2,
+      y: player.y - 6,
+      w: 4, h: 8,
+      vy: -player.bulletSpeed,
+      dmg: player.damage,
+      pierce: !!player.pierce,
+      spread: spread
+    });
+  }
+  player.ammo--;
+  player.cooldown = player.fireRate;
+}
+
+function updateReload(){
+  if(player.reloading){
+    player.reloadCounter++;
+    if(player.reloadCounter >= player.reloadTime){
+      player.ammo = player.maxAmmo;
+      player.reloading = false;
+      player.reloadCounter = 0;
+    }
+  } else {
+    // pressing R starts reload
+    if(keys.reload && player.ammo < player.maxAmmo){
+      player.reloading = true;
+      player.reloadCounter = 0;
+    }
+  }
+}
+
+/* ----------------------
+   Explosion: smoke ring (choice 3.C)
+   ---------------------- */
+function createSmokeRing(x, y){
+  const count = 18;
+  for(let i=0;i<count;i++){
+    const ang = (i / count) * Math.PI * 2;
+    const speed = rand(0.8, 3.2);
+    particles.push({
+      x: x + rand(-6,6),
+      y: y + rand(-6,6),
+      vx: Math.cos(ang) * speed,
+      vy: Math.sin(ang) * speed - 0.8, // slight upward
+      life: 30 + Math.floor(rand(0,20)),
+      size: Math.floor(rand(2,4)),
+      alpha: 1
+    });
+  }
+}
+
+/* ----------------------
+   Collision and update
+   ---------------------- */
+function updateGame(){
+  if(!running || pausedForSkill) return;
+
+  // player move
+  if(keys.left) player.x -= player.speed;
+  if(keys.right) player.x += player.speed;
+  player.x = clamp(player.x, 0, W - player.w);
+
+  // shooting
+  if(keys.shoot) tryShoot();
+  if(player.cooldown > 0) player.cooldown--;
+
+  // reload
+  updateReload();
+
+  // bullets movement (no pre-removal)
+  for(let i=bullets.length-1; i>=0; i--){
+    const b = bullets[i];
+    // if bullet had spread we could apply small offset on x (not necessary here)
+    b.y += b.vy;
+    // if offscreen remove
+    if(b.y < -20 || b.y > H + 20){
+      bullets.splice(i,1);
+      continue;
+    }
+
+    // check collision (bullet must hit enemy then enemy dies)
+    let hit = false;
+    for(let j=enemies.length-1; j>=0; j--){
+      const e = enemies[j];
+      if(b.x < e.x + e.w && b.x + (b.w||4) > e.x && b.y < e.y + e.h && b.y + (b.h||8) > e.y){
+        // bullet hits enemy
+        // create smoke ring around enemy center
+        createSmokeRing(e.x + e.w/2, e.y + e.h/2);
+
+        // remove enemy immediately (bullet kills instantly)
+        enemies.splice(j,1);
+
+        // remove bullet
+        bullets.splice(i,1);
+
+        // score & exp
+        score += 10;
+        addExp(5);
+
+        hit = true;
+        break;
+      }
+    }
+    if(hit) continue;
+  }
+
+  // enemies movement & reaching bottom
+  for(let i=enemies.length-1;i>=0;i--){
+    const e = enemies[i];
+    e.y += e.speed;
+    if(e.y > H){
+      enemies.splice(i,1);
+      lives--;
+      if(lives <= 0){ gameOver(); return; }
+    }
+  }
+
+  // particle update
+  for(let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.98;
+    p.vy *= 0.98;
+    p.life--;
+    p.alpha = Math.max(0, p.life / 40);
+    if(p.life <= 0) particles.splice(i,1);
+  }
+
+  // wave progression
+  if(enemies.length === 0){
+    wave++;
+    spawnWave();
+  }
+
+  updateHUD();
+}
+
+/* ----------------------
+   EXP & level & skills
+   ---------------------- */
+function addExp(amount){
+  if(level >= maxLevel) return;
+  exp += amount;
+  if(exp >= expToNext){
+    // level up (handle multiple levels if large exp)
+    while(exp >= expToNext && level < maxLevel){
+      exp -= expToNext;
+      level++;
+      expToNext *= 2;
+      // pause and show skill choices
+      showSkillChoices();
+    }
+  }
+  updateHUD();
+}
+
+function showSkillChoices(){
+  pausedForSkill = true;
+  // pick 3 unique skills
+  const choices = [];
+  while(choices.length < 3){
+    const s = allSkills[Math.floor(Math.random()*allSkills.length)];
+    if(!choices.includes(s)) choices.push(s);
+  }
+
+  const screen = document.getElementById('skillScreen');
+  const holder = document.getElementById('skillChoices');
+  holder.innerHTML = '';
+  choices.forEach(skill=>{
+    const b = document.createElement('button');
+    b.className = 'skillBtn';
+    b.textContent = skill;
+    b.onclick = ()=>{
+      applySkill(skill);
+      learnedSkills[skill] = (learnedSkills[skill]||0) + 1;
+      screen.style.display = 'none';
+      pausedForSkill = false;
+    };
+    holder.appendChild(b);
+  });
+  screen.style.display = 'flex';
+}
+
+/* Simple skill effects for several named skills; for other names map to similar effects */
+function applySkill(skill){
+  switch(skill){
+     case "Extra Life +1":
+      lives++;
+      break;
+
+    case "Faster Player":
+      player.speed += 1;
+      break;
+
+    case "Reduce Cooldown":
+      player.fireRate = Math.max(4, player.fireRate - 3);
+      break;
+
+    case "Double Ammo":
+      player.maxAmmo += 20;
+      player.ammo = player.maxAmmo;
+      break;
+
+    case "Multi Shot +1":
+      player.multi = (player.multi || 1) + 1;
+      break;
+
+    case "Rapid Fire":
+      player.fireRate = Math.max(2, player.fireRate - 6);
+      break;
+
+    default:
+      break;
+  }
+}
+
+/* some simple skill helpers */
+function freezeEnemies(frames){
+  enemies.forEach(e=> e._frozen = frames );
+}
+function slowEnemies(factor, frames){
+  enemies.forEach(e=> { e._slowFactor = factor; e._slowTimer = frames; });
+}
+
+/* ----------------------
+   Draw everything
+   ---------------------- */
+function drawAll(){
+  // background
+  ctx.fillStyle = '#071024';
+  ctx.fillRect(0,0,W,H);
+
+  // draw enemies
+  ctx.fillStyle = '#ff6b6b';
+  enemies.forEach(e=>{
+    ctx.fillRect(Math.round(e.x), Math.round(e.y), e.w, e.h);
+  });
+
+  // draw bullets
+  ctx.fillStyle = '#9be7ff';
+  bullets.forEach(b=>{
+    ctx.fillRect(Math.round(b.x), Math.round(b.y), 4, 8);
+  });
+
+  // draw particles (smoke)
+  particles.forEach(p=>{
+    ctx.globalAlpha = Math.max(0.2, p.alpha || 1);
+    ctx.fillStyle = '#ffd166';
+    ctx.fillRect(Math.round(p.x), Math.round(p.y), p.size || 3, p.size || 3);
+    ctx.globalAlpha = 1;
+  });
+
+  // draw player as pixel "x" (centered on player.x,player.y)
+  drawPlayerX(Math.round(player.x), Math.round(player.y));
+
+  // HUD drawn in overlay div (to keep crisp)
+  // (we still draw minimal text on canvas for fidelity if needed)
+}
+
+/* draw pixel 'x' for player */
+function drawPlayerX(px, py){
+  // use PIX block size for player pixel-art
+  const PIX = 6;
+  const map = [
+    'x   x',
+    ' x x ',
+    '  x  ',
+    ' x x ',
+    'x   x'
+  ];
+  // align map centered on player box
+  const offsetX = Math.round(px - (map[0].length*PIX)/2 + player.w/2);
+  const offsetY = Math.round(py - (map.length*PIX)/2 + player.h/2);
+  ctx.fillStyle = '#61dafb';
+  for(let y=0;y<map.length;y++){
+    for(let x=0;x<map[y].length;x++){
+      if(map[y][x] === 'x'){
+        ctx.fillRect(offsetX + x*PIX, offsetY + y*PIX, PIX, PIX);
+      }
+    }
+  }
+}
+
+/* ----------------------
+   Game over
+   ---------------------- */
+function gameOver(){
+  running = false;
+  document.getElementById('gameOverScreen').style.display = 'flex';
+  document.getElementById('finalScore').textContent = `Score: ${score}`;
+}
+/*---------------
+    Pause/resume
+ ---------------*/
+
+function togglePause(){
+  if(pausedForSkill) return; // ห้าม pause ตอนเลือกสกิล
+
+  isPaused = !isPaused;
+
+  if(!isPaused){
+    requestAnimationFrame(loop); // resume
+  }
+}
+/* ----------------------
+   Main loop
+   ---------------------- */
+function loop(){
+  if(!running) return;
+  updateGame();
+  drawAll();
+  requestAnimationFrame(loop);
+}
+
+/* ----------------------
+   Input handling
+   ---------------------- */
+window.addEventListener('keydown', e=>{
+  if(e.key === 'ArrowLeft' || e.key === 'a') keys.left = true;
+  if(e.key === 'ArrowRight' || e.key === 'd') keys.right = true;
+  if(e.key === ' ' || e.key === 'Spacebar') keys.shoot = true;
+  if(e.key === 'r' || e.key === 'R') keys.reload = true;
+});
+window.addEventListener('keyup', e=>{
+  if(e.key === 'ArrowLeft' || e.key === 'a') keys.left = false;
+  if(e.key === 'ArrowRight' || e.key === 'd') keys.right = false;
+  if(e.key === ' ' || e.key === 'Spacebar') keys.shoot = false;
+  if(e.key === 'r' || e.key === 'R') keys.reload = false;
+});
+
+/* ----------------------
+   Start initial UI state
+   ---------------------- */
+updateHUD();
+
+/* ----------------------
+   Exported for console debug (optional)
+   ---------------------- */
+window.__ps = { initGame, spawnWave, addExp };
+
+</script>
+</body>
+</html>
+ส่งเมื่อ 1 นาทีที่แล้ว
+เขียนถึง
+
+
